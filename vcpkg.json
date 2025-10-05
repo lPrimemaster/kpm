@@ -1,0 +1,9 @@
+{
+	"name": "kpm",
+	"dependencies": [
+		"curl",
+		"yaml-cpp",
+		"libarchive",
+		"cli11"
+	]
+}
