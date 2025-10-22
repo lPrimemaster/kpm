@@ -2,8 +2,10 @@ name: Build and Deploy
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - master
+    # tags:
+    #   - 'v*'
 
 jobs:
   build:
@@ -30,11 +32,11 @@ jobs:
 
       - name: Configure (Linux)
         if: runner.os == 'Linux'
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLTRACE=OFF
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLTRACE=OFF -DCMAKE_TOOLCHAIN_FILE="./vcpkg/scripts/buildsystems/vcpkg.cmake"
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLTRACE=OFF -DVCPKG_TARGET_TRIPLET=x64-windows-static
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLTRACE=OFF -DCMAKE_TOOLCHAIN_FILE="./vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static
 
       - name: Cache vcpkg
         uses: actions/cache@v3
@@ -74,7 +76,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          # tag_name: ${{ github.ref_name }}
+          tag_name: release-latest
           files: |
             dist/linux/kpm
             dist/windows/kpm.exe
