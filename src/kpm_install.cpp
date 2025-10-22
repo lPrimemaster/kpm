@@ -384,7 +384,7 @@ std::string KpmGetCachePath()
 	{
 		case KpmOs::WIN32:
 		{
-			_kpm_cache_path = std::string(std::getenv("%APPDATA%")) + "\\kpm\\"; 
+			_kpm_cache_path = std::string(std::getenv("APPDATA")) + "\\kpm\\"; 
 			std::filesystem::create_directories(_kpm_cache_path);
 			break;
 		}
@@ -411,7 +411,7 @@ static std::string KpmGetInstallPath(const YAML::Node& config)
 	{
 		case KpmOs::WIN32:
 		{
-			const char* home = std::getenv("%PROGRAMFILES%");
+			const char* home = std::getenv("PROGRAMFILES");
 			_kpm_install_prefix = std::string(home) + "\\" + config["metadata"]["name"].as<std::string>() + "\\";
 			break;
 		}
