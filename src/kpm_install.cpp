@@ -20,6 +20,12 @@
 #include <sys/utsname.h>
 #else
 #include <windows.h>
+#include <sys/stat.h>
+
+#ifndef S_ISDIR
+#define S_ISDIR(m)  (((m) & _S_IFMT) == _S_IFDIR)
+#endif
+
 #endif
 
 KPM_SET_LOG_PREFIX(KpmInstall);
@@ -48,6 +54,10 @@ enum class KpmArch
 
 	UNKNOWN
 };
+
+#ifdef WIN32
+#undef WIN32
+#endif
 
 //kpm supported os
 enum class KpmOs
