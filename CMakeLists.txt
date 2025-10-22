@@ -26,6 +26,7 @@ find_package(CLI11 CONFIG REQUIRED)
 add_executable(kpm
 	main.cpp
 	src/kpm_install.cpp
+	src/kpm_remove.cpp
 )
 
 target_link_libraries(kpm PRIVATE
@@ -34,5 +35,3 @@ target_link_libraries(kpm PRIVATE
 	LibArchive::LibArchive	
 	CLI11::CLI11
 )
-
-add_subdirectory(test)

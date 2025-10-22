@@ -1,15 +1,20 @@
 #include "../kpm.h"
 #include "logger.inl"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
+#include <regex>
 
 #include <curl/curl.h>
 #include <yaml-cpp/exceptions.h>
+#include <yaml-cpp/node/parse.h>
 #include <yaml-cpp/yaml.h>
 #include <archive.h>
 #include <archive_entry.h>
+#include <nlohmann/json.hpp>
 
 #ifndef _WIN32
 #include <sys/utsname.h>
@@ -26,7 +31,8 @@ static std::string _kpm_cache_path;
 enum class KpmMediaType
 {
 	LOCAL,
-	REMOTE
+	REMOTE,
+	GITHUB
 };
 
 // kpm supported archs
@@ -51,12 +57,82 @@ enum class KpmOs
 	DARWIN
 };
 
+template<typename T> requires (std::is_same_v<T, nlohmann::json> || std::is_same_v<T, std::string> || std::is_same_v<T, YAML::Node>)
+static std::optional<T> KpmGet(const std::string& url)
+{
+	CURL* curl = curl_easy_init();
+
+	if(!curl)
+	{
+		KpmLogError("Failed to init CURL.");
+		return std::nullopt;
+	}
+
+	std::string buffer;
+	const auto write_handle = +[](void* ptr, size_t size, size_t nmemb, void* userdata) -> std::size_t {
+		auto* stream = reinterpret_cast<std::string*>(userdata);
+		std::size_t total_size = size * nmemb;
+		stream->append(static_cast<char*>(ptr), total_size);
+		return total_size;
+	};
+
+	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_handle);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+	curl_easy_setopt(curl, CURLOPT_USERAGENT, "Kpm-Client-App");
+
+	CURLcode res = curl_easy_perform(curl);
+	if(res != CURLE_OK)
+	{
+		KpmLogError("Failed to fetch github api info for given repository.");
+		curl_easy_cleanup(curl);
+		return std::nullopt;
+	}
+
+	curl_easy_cleanup(curl);
+
+	if constexpr (std::is_same_v<T, nlohmann::json>)
+	{
+		return nlohmann::json::parse(buffer);
+	}
+
+	if constexpr (std::is_same_v<T, std::string>)
+	{
+		return buffer;
+	}
+
+	if constexpr (std::is_same_v<T, YAML::Node>)
+	{
+		return YAML::Load(buffer);
+	}
+}
+
+template<typename T>
+static std::int32_t KpmJsonFindInArray(const nlohmann::json& json, const std::string& key, const T& value)
+{
+	auto it = std::find_if(json.begin(), json.end(), [&](const nlohmann::json& obj) { return obj.contains(key) && obj[key] == value; });
+	return it == json.end() ? -1 : std::distance(json.begin(), it);
+}
+
+static bool KpmCheckGithubRepo(const std::string& package)
+{
+	// The repository name can only contain ASCII letters, digits, and the characters ., -, and _
+	std::regex re("^\\w+\\/[\\w|\\-|\\.|_]+");
+	return std::regex_match(package, re);
+}
+
 static KpmMediaType KpmDetectMedia(const std::string& package)
 {
 	if(std::filesystem::exists(std::filesystem::path(package)))
 	{
 		KpmLogTrace("Media type = LOCAL");
 		return KpmMediaType::LOCAL;
+	}
+
+	if(KpmCheckGithubRepo(package))
+	{
+		KpmLogTrace("Media type = GITHUB");
+		return KpmMediaType::GITHUB;
 	}
 
 	// Treat it such as if it is not a file, it is an url
@@ -287,7 +363,7 @@ static bool KpmDeploySource(const std::string& package, const YAML::Node& config
 	return false;
 }
 
-static std::string KpmGetCachePath()
+std::string KpmGetCachePath()
 {
 	if(!_kpm_cache_path.empty())
 	{
@@ -540,30 +616,76 @@ static bool KpmWriteManifest(const YAML::Node& config)
 	return true;
 }
 
-static bool KpmInstallFromMemory(const std::string& data) noexcept
+static std::optional<YAML::Node> KpmReadConfigFile(const std::string& file)
 {
-	YAML::Node config;
 	try
 	{
-		config = YAML::Load(data);
+		return YAML::Load(file);
 	}
 	catch (const YAML::ParserException& e)
 	{
 		KpmLogError("YAML parsing error: {}", e.what());
-		return false;
+		return std::nullopt;
     }
 	catch (const YAML::Exception& e)
 	{
 		KpmLogError("YAML error: {}", e.what());
-		return false;
+		return std::nullopt;
     }
+}
 
+static std::optional<std::string> KpmGithubFetchEndpoint(const std::string& repo, const YAML::Node& config)
+{
+	auto info = KpmGet<nlohmann::json>("https://api.github.com/repos/" + repo + "/releases");
+	if(!info.has_value())
+	{
+		return std::nullopt;
+	}
+
+	auto json = info.value();
+
+	if(json.is_object() && json.contains("message") && json["message"] == "Not Found")
+	{
+		KpmLogError("Failed to find the github repo: {}", repo);
+		return std::nullopt;
+	}
+
+	if(json.is_array() && json.empty())
+	{
+		KpmLogError("Found repo {}, but no release is available.", repo);
+		return std::nullopt;
+	}
+
+	std::int32_t index = 0; // latest release by default
+	std::string tag = config["dist"]["tag"].as<std::string>();
+
+	if(tag != "latest")
+	{
+		std::int32_t candidate = KpmJsonFindInArray(json, "tag_name", tag);
+
+		if(candidate < 0)
+		{
+			KpmLogError("Could not find candidate tag {}.", tag);
+			KpmLogWarning("Defaulting to latest tag available ('latest').");
+		}
+
+		index = candidate > 0 ? candidate : 0;
+	}
+
+	std::string endpoint = json[index]["assets"][0]["browser_download_url"];
+	return endpoint.substr(0, endpoint.rfind('/'));
+}
+
+static bool KpmInstallFromMemory(const std::string& data) noexcept
+{
 	std::optional<std::string> plat_tag = KpmGetPackagePlatformTag();
 	if(!plat_tag.has_value())
 	{
 		KpmLogError("Could not find a valid or compatible system <os>_<arch> tag.");
 		return false;
 	}
+
+	YAML::Node config = KpmReadConfigFile(data).value_or(YAML::Node{});
 
 	if(!KpmValidateConfig(config))
 	{
@@ -573,6 +695,25 @@ static bool KpmInstallFromMemory(const std::string& data) noexcept
 
 	std::unordered_map<std::string, std::string> platform_map;
 	std::string endpoint = config["dist"]["endpoint"].as<std::string>();
+
+	// Resolve the endpoint if this is a github repo
+	if(KpmCheckGithubRepo(endpoint))
+	{
+		auto candidate = KpmGithubFetchEndpoint(endpoint, config);
+		if(!candidate.has_value())
+		{
+			KpmLogError("Invalid github repository or config.");
+			return false;
+		}
+
+		endpoint = candidate.value();
+	}
+
+	if(!endpoint.ends_with('/'))
+	{
+		endpoint += '/';
+	}
+
 	for (const auto& item : config["dist"]["packages"])
 	{
 		if (item.IsMap() && item.size() == 1)
@@ -617,6 +758,38 @@ static bool KpmInstallFromMemory(const std::string& data) noexcept
 	return KpmWriteManifest(config);
 }
 
+static std::tuple<bool, std::string> KpmGithubSupportsKpm(const std::string& repo)
+{
+	auto json_info_c = KpmGet<nlohmann::json>("https://api.github.com/repos/" + repo + "/contents");
+	if(json_info_c && !json_info_c.value().empty())
+	{
+		std::int32_t index = KpmJsonFindInArray(json_info_c.value(), "path", "kpm.yaml");
+		if(index == -1)
+		{
+			// Try yml
+			index = KpmJsonFindInArray(json_info_c.value(), "path", "kpm.yml");
+			if(index == -1)
+			{
+				return {false, ""};
+			}
+		}
+		return {true, json_info_c.value()[index]["download_url"]};
+	}
+	return {false, ""};
+}
+
+static std::string KpmGithubProcessPackage(const std::string& repo)
+{
+	// Check if repo is valid
+	auto [gh_support, gh_yaml_url] = KpmGithubSupportsKpm(repo);
+	if(!gh_support)
+	{
+		return "";
+	}
+
+	return gh_yaml_url;
+}
+
 static bool KpmInstallFromUrl(const std::string& url)
 {
 	std::optional<std::string> data = KpmLoadYamlRemote(url);
@@ -651,13 +824,18 @@ bool KpmInstall(const std::string& package, const std::string& path)
 		KpmInstallSetPath(path);
 	}
 
+	std::string url = package;
+
 	switch (KpmDetectMedia(package))
 	{
 		case KpmMediaType::LOCAL:
 			return KpmInstallFromFile(package);
 			break;
+		case KpmMediaType::GITHUB:
+			url = KpmGithubProcessPackage(package);
+			[[fallthrough]];
 		case KpmMediaType::REMOTE:
-			return KpmInstallFromUrl(package);
+			return KpmInstallFromUrl(url);
 	}
 	return false;
 }

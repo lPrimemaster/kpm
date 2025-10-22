@@ -52,6 +52,7 @@ int main(int argc, char* argv[])
 	}
 	else if(remove->parsed())
 	{
+		KpmRemove(package_name);
 	}
 	else if(pack->parsed())
 	{
