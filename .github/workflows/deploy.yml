@@ -1,0 +1,82 @@
+name: Build and Deploy
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install vcpkg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git
+          ./vcpkg/bootstrap-vcpkg.sh
+
+      - name: Install vcpkg (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git
+          ./vcpkg/bootstrap-vcpkg.bat
+
+      - name: Configure (Linux)
+        if: runner.os == 'Linux'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLTRACE=OFF
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLTRACE=OFF -DVCPKG_TARGET_TRIPLET=x64-windows-static
+
+      - name: Cache vcpkg
+        uses: actions/cache@v3
+        with:
+          path: vcpkg/installed
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os == 'windows-latest' && 'kpm.exe' || 'kpm' }}
+          path: ${{ matrix.os == 'windows-latest' && 'build/Release/kpm.exe' || 'build/kpm' }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: kpm.exe
+          path: dist/windows
+
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: kpm
+          path: dist/linux
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/linux/kpm
+            dist/windows/kpm.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
