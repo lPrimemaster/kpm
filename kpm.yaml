@@ -1,7 +1,7 @@
 metadata:
   name: kpm
   description: The kpm package manager.
-  version: 0.1.0
+  version: 0.2.0
 
 dist:
   # Can be a directory or a url or a github repo
