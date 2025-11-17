@@ -2,9 +2,12 @@
 #include "logger.inl"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <nlohmann/json_fwd.hpp>
 #include <optional>
 #include <regex>
 
@@ -686,6 +689,119 @@ static std::optional<std::string> KpmGithubFetchEndpoint(const std::string& repo
 	return endpoint.substr(0, endpoint.rfind('/'));
 }
 
+static bool KpmCheckCommand(const std::string& cmd)
+{
+#ifdef _WIN32
+	std::string test = "where " + cmd + " >nul 2>&1";
+#else
+	std::string test = "command -v " + cmd + " >/dev/null 2>&1";
+#endif
+	return std::system(test.c_str()) == 0;
+}
+
+static bool KpmRunCommand(const std::string& cmd, const std::string& pipein)
+{
+	FILE* pipe = popen(cmd.c_str(), "w");
+	fwrite(pipein.c_str(), 1, pipein.size(), pipe);
+	return pclose(pipe) == 0;
+}
+
+static std::string KpmConfigMetadataToJsonString(const YAML::Node& config)
+{
+	nlohmann::json json;
+	json["package_name"] = config["metadata"]["name"].as<std::string>();
+	json["cache_path"] = KpmGetCachePath();
+	json["install_prefix"] = KpmGetInstallPath(config);
+	return json.dump();
+}
+
+static void KpmLaunchScript(const std::filesystem::path& path, const YAML::Node& config)
+{
+	std::string candidate_cmd = "python3";
+	if(!KpmCheckCommand(candidate_cmd))
+	{
+		candidate_cmd = "python";
+		if(!KpmCheckCommand(candidate_cmd))
+		{
+			KpmLogError("Failed to find the Python interpreter on system.");
+			return;
+		}
+	}
+
+	candidate_cmd += " ";
+	candidate_cmd += path;
+	std::string pipein = KpmConfigMetadataToJsonString(config);
+
+	KpmLogTrace("Calling user deploy script.");
+	KpmLogTrace("\tCandidate command:");
+	KpmLogTrace("\t\t{}", candidate_cmd);
+
+	KpmLogTrace("\tPipe in:");
+	KpmLogTrace("\t\t{}", pipein);
+
+	if(!KpmRunCommand(candidate_cmd, pipein))
+	{
+		KpmLogError("Failed to run deploy command.");
+		return;
+	}
+}
+
+static void KpmPopulateManifestUserFile(const YAML::Node& config)
+{
+	const auto user_config = std::filesystem::path(KpmGetCachePath() + config["metadata"]["name"].as<std::string>() + ".user.json");
+	if(!std::filesystem::exists(user_config))
+	{
+		// User didn't output anything
+		// Nothing to do
+		return;
+	}
+
+	std::ifstream f(user_config);
+	auto json = nlohmann::json::parse(f);
+
+	if(json.contains("additional_files") && json["additional_files"].is_array())
+	{
+		for(const auto& file : json["additional_files"])
+		{
+			// Check if file is in fact there
+			const auto filepath = file.get<std::string>();
+			if(!std::filesystem::exists(filepath))
+			{
+				KpmLogWarning("Additional file <{}> not found. Ignoring...", filepath);
+				continue;
+			}
+
+			KpmInstallManifestAddPath(filepath);
+		}
+	}
+	
+	// Now delete the manifest.user.config
+	std::filesystem::remove(user_config);
+}
+
+static void KpmRunUserPostInstallScript(const YAML::Node& config)
+{
+	if(!config["dist"]["deploy"])
+	{
+		// There is no user deploy script
+		// Silently ignore
+		return;
+	}
+
+	const auto path = std::filesystem::path(KpmGetInstallPath(config) + config["dist"]["deploy"].as<std::string>());
+	if(!std::filesystem::exists(path))
+	{
+		KpmLogError("Deploy script referenced, but file <{}> does not exist.", path.filename().string());
+		return;
+	}
+
+	// All ok, load the script and run it
+	KpmLaunchScript(path, config);
+
+	// Check if there is a user file with info for us to write on the manifest file
+	KpmPopulateManifestUserFile(config);
+}
+
 static bool KpmInstallFromMemory(const std::string& data) noexcept
 {
 	std::optional<std::string> plat_tag = KpmGetPackagePlatformTag();
@@ -764,6 +880,8 @@ static bool KpmInstallFromMemory(const std::string& data) noexcept
 
 	// TODO: (César) If prebuild or source fails during copying files
 	// 				 check if there are some dangling files that we need to remove
+	
+	KpmRunUserPostInstallScript(config);
 
 	return KpmWriteManifest(config);
 }
