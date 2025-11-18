@@ -19,8 +19,9 @@
 #include <archive_entry.h>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
-#include <Python.h>
 
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
 
 #ifndef _WIN32
 #include <sys/utsname.h>
@@ -552,10 +553,10 @@ static bool KpmExtractPackageData(const std::vector<std::uint8_t>& payload, cons
 		std::string filepath = archive_prepend_path(entry, parent);
 
 		// We don't write directories to the manifest file
-		if(!S_ISDIR(archive_entry_filetype(entry)))
-		{
-			KpmInstallManifestAddPath(filepath);
-		}
+		// if(!S_ISDIR(archive_entry_filetype(entry)))
+		// {
+		KpmInstallManifestAddPath(filepath);
+		// }
 
 		r = archive_write_header(ext, entry);
 		if(!archive_check_ok(ext))
@@ -693,19 +694,53 @@ static std::optional<std::string> KpmGithubFetchEndpoint(const std::string& repo
 
 static std::vector<std::string> KpmLaunchScript(const std::filesystem::path& path, const YAML::Node& config)
 {
-	Py_Initialize();
-	KpmLogTrace("Running: {}", path.string());
-	FILE* fp = fopen(path.string().c_str(), "r");
-	if(fp)
+	// Init python
+	// NOTE: (César) Prevent bytecode generation
+	
+	PyConfig pyconfig;
+
+	PyConfig_InitPythonConfig(&pyconfig);
+	pyconfig.write_bytecode = 0;
+
+	PyStatus pystatus = Py_InitializeFromConfig(&pyconfig);
+
+	if(PyStatus_Exception(pystatus))
 	{
-		PyRun_SimpleFile(fp, path.filename().string().c_str());
-		fclose(fp);
+		PyConfig_Clear(&pyconfig);
+		Py_ExitStatusException(pystatus);
 	}
 
-	auto* main = PyImport_AddModule("__main__");
-	auto* global = PyModule_GetDict(main);
+	PyConfig_Clear(&pyconfig);
 
-	auto* post_install_func = PyDict_GetItemString(global, "post_install");
+	auto abs_path = std::filesystem::absolute(path);
+
+	auto* sys_path = PySys_GetObject("path");
+	PyList_Append(sys_path, PyUnicode_FromString(abs_path.parent_path().string().c_str()));
+
+	KpmLogTrace("Running: {}", path.filename().string());
+	
+	auto* script_name = PyUnicode_FromString(path.filename().replace_extension("").string().c_str());
+	auto* module = PyImport_Import(script_name);
+	Py_DECREF(script_name);
+
+	if(!module)
+	{
+		PyErr_Print();
+		KpmLogError("User must define a 'post_install' function.");
+		KpmLogError("Failed to launch python user script.");
+		Py_Finalize();
+		return {};
+	}
+
+	auto* post_install_func = PyObject_GetAttrString(module, "post_install");
+	if(!post_install_func || !PyCallable_Check(post_install_func))
+	{
+		PyErr_Print();
+		Py_XDECREF(post_install_func);
+		Py_DECREF(module);
+		Py_Finalize();
+		return {};
+	}
 
 	auto* args = PyTuple_Pack(
 		3,
@@ -715,12 +750,15 @@ static std::vector<std::string> KpmLaunchScript(const std::filesystem::path& pat
 	);
 
 	auto* result = PyObject_CallObject(post_install_func, args);
+	Py_DECREF(args);
 
-	if(!PyDict_Check(result))
+	if(!result || !PyDict_Check(result))
 	{
+		PyErr_Print();
 		KpmLogError("Function 'post_install' must return a dictionary.");
-		Py_DECREF(args);
 		Py_XDECREF(result);
+		Py_DECREF(post_install_func);
+		Py_DECREF(module);
 		Py_Finalize();
 		return {};
 	}
@@ -728,8 +766,18 @@ static std::vector<std::string> KpmLaunchScript(const std::filesystem::path& pat
 	auto* items = PyDict_GetItemString(result, "additional_files");
 	std::vector<std::string> additional_files;
 
-	auto size = PyList_Size(items);
+	if(!items || !PyList_Check(items))
+	{
+		PyErr_Print();
+		KpmLogError("'additional_files' must return be a list.");
+		Py_XDECREF(result);
+		Py_DECREF(post_install_func);
+		Py_DECREF(module);
+		Py_Finalize();
+		return {};
+	}
 
+	auto size = PyList_Size(items);
 	for(Py_ssize_t i = 0; i < size; i++)
 	{
 		auto* item = PyList_GetItem(items, i);
@@ -742,8 +790,9 @@ static std::vector<std::string> KpmLaunchScript(const std::filesystem::path& pat
 		additional_files.emplace_back(PyUnicode_AsUTF8(item));
 	}
 
-	Py_DECREF(args);
-	Py_XDECREF(result);
+	Py_DECREF(result);
+	Py_DECREF(post_install_func);
+	Py_DECREF(module);
 	Py_Finalize();
 
 	return additional_files;
@@ -784,8 +833,10 @@ static void KpmRunUserPostInstallScript(const YAML::Node& config)
 	// All ok, load the script and run it
 	auto additional_files = KpmLaunchScript(path, config);
 
-	// Check if there is a user file with info for us to write on the manifest file
-	KpmPopulateManifestUserFile(additional_files);
+	if(!additional_files.empty())
+	{
+		KpmPopulateManifestUserFile(additional_files);
+	}
 }
 
 static bool KpmInstallFromMemory(const std::string& data) noexcept

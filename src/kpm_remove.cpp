@@ -1,5 +1,6 @@
 #include "../kpm.h"
 #include "../kpm_logger.h"
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -31,10 +32,31 @@ static std::optional<std::vector<std::string>> KpmReadManifest(const std::string
 	return files;
 }
 
+static std::tuple<std::vector<std::string>, std::vector<std::string>> KpmOrderFiles(const std::vector<std::string>& files)
+{
+	std::vector<std::string> ofiles;
+	std::vector<std::string> odirs;
+
+	for(const auto& file : files)
+	{
+		if(std::filesystem::is_directory(file))
+		{
+			odirs.push_back(file);
+		}
+		else
+		{
+			ofiles.push_back(file);
+		}
+	}
+
+	return { ofiles, odirs };
+}
+
 static bool KpmRemoveFiles(const std::vector<std::string>& files)
 {
+	auto [ofiles, odirs] = KpmOrderFiles(files);
 	bool ok = true;
-	for(const auto& file : files)
+	for(const auto& file : ofiles)
 	{
 		if(std::filesystem::exists(file))
 		{
@@ -48,6 +70,26 @@ static bool KpmRemoveFiles(const std::vector<std::string>& files)
 		else
 		{
 			KpmLogError("Failed to remove file {}. Does not exist.", file);
+		}
+	}
+
+	for(const auto& dir : odirs)
+	{
+		if(std::filesystem::exists(dir))
+		{
+			if(std::filesystem::is_empty(dir))
+			{
+				KpmLogTrace("Removing empty dir: {}", dir);
+				if(!std::filesystem::remove_all(dir))
+				{
+					KpmLogError("Failed to remove dir {}.", dir);
+					ok = false;
+				}
+			}
+		}
+		else
+		{
+			KpmLogError("Failed to remove dir {}. Does not exist.", dir);
 		}
 	}
 

@@ -29,12 +29,6 @@ if(MSVC)
 	add_link_options("/IGNORE:4098")
 endif()
 
-# if(MSVC)
-# 	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-# else()
-# 	set(CMAKE_EXE_LINKER_FLAGS "-static")
-# endif()
-
 add_executable(kpm
 	main.cpp
 	src/kpm_install.cpp
