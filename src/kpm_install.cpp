@@ -7,9 +7,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
-#include <nlohmann/json_fwd.hpp>
 #include <optional>
 #include <regex>
+#include <cstdio>
 
 #include <curl/curl.h>
 #include <yaml-cpp/exceptions.h>
@@ -18,6 +18,9 @@
 #include <archive.h>
 #include <archive_entry.h>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <Python.h>
+
 
 #ifndef _WIN32
 #include <sys/utsname.h>
@@ -28,7 +31,6 @@
 #ifndef S_ISDIR
 #define S_ISDIR(m)  (((m) & _S_IFMT) == _S_IFDIR)
 #endif
-
 #endif
 
 KPM_SET_LOG_PREFIX(KpmInstall);
@@ -689,94 +691,78 @@ static std::optional<std::string> KpmGithubFetchEndpoint(const std::string& repo
 	return endpoint.substr(0, endpoint.rfind('/'));
 }
 
-static bool KpmCheckCommand(const std::string& cmd)
+static std::vector<std::string> KpmLaunchScript(const std::filesystem::path& path, const YAML::Node& config)
 {
-#ifdef _WIN32
-	std::string test = "where " + cmd + " >nul 2>&1";
-#else
-	std::string test = "command -v " + cmd + " >/dev/null 2>&1";
-#endif
-	return std::system(test.c_str()) == 0;
-}
-
-static bool KpmRunCommand(const std::string& cmd, const std::string& pipein)
-{
-	FILE* pipe = popen(cmd.c_str(), "w");
-	fwrite(pipein.c_str(), 1, pipein.size(), pipe);
-	return pclose(pipe) == 0;
-}
-
-static std::string KpmConfigMetadataToJsonString(const YAML::Node& config)
-{
-	nlohmann::json json;
-	json["package_name"] = config["metadata"]["name"].as<std::string>();
-	json["cache_path"] = KpmGetCachePath();
-	json["install_prefix"] = KpmGetInstallPath(config);
-	return json.dump();
-}
-
-static void KpmLaunchScript(const std::filesystem::path& path, const YAML::Node& config)
-{
-	std::string candidate_cmd = "python3";
-	if(!KpmCheckCommand(candidate_cmd))
+	Py_Initialize();
+	KpmLogTrace("Running: {}", path.string());
+	FILE* fp = fopen(path.string().c_str(), "r");
+	if(fp)
 	{
-		candidate_cmd = "python";
-		if(!KpmCheckCommand(candidate_cmd))
+		PyRun_SimpleFile(fp, path.filename().string().c_str());
+		fclose(fp);
+	}
+
+	auto* main = PyImport_AddModule("__main__");
+	auto* global = PyModule_GetDict(main);
+
+	auto* post_install_func = PyDict_GetItemString(global, "post_install");
+
+	auto* args = PyTuple_Pack(
+		3,
+		PyUnicode_FromString(config["metadata"]["name"].as<std::string>().c_str()),
+		PyUnicode_FromString(KpmGetCachePath().c_str()),
+		PyUnicode_FromString(KpmGetInstallPath(config).c_str())
+	);
+
+	auto* result = PyObject_CallObject(post_install_func, args);
+
+	if(!PyDict_Check(result))
+	{
+		KpmLogError("Function 'post_install' must return a dictionary.");
+		Py_DECREF(args);
+		Py_XDECREF(result);
+		Py_Finalize();
+		return {};
+	}
+
+	auto* items = PyDict_GetItemString(result, "additional_files");
+	std::vector<std::string> additional_files;
+
+	auto size = PyList_Size(items);
+
+	for(Py_ssize_t i = 0; i < size; i++)
+	{
+		auto* item = PyList_GetItem(items, i);
+		if(!PyUnicode_Check(item))
 		{
-			KpmLogError("Failed to find the Python interpreter on system.");
-			return;
+			KpmLogError("additional_files[{}] is not a string.", i);
+			continue;
 		}
+
+		additional_files.emplace_back(PyUnicode_AsUTF8(item));
 	}
 
-	candidate_cmd += " ";
-	candidate_cmd += path;
-	std::string pipein = KpmConfigMetadataToJsonString(config);
+	Py_DECREF(args);
+	Py_XDECREF(result);
+	Py_Finalize();
 
-	KpmLogTrace("Calling user deploy script.");
-	KpmLogTrace("\tCandidate command:");
-	KpmLogTrace("\t\t{}", candidate_cmd);
-
-	KpmLogTrace("\tPipe in:");
-	KpmLogTrace("\t\t{}", pipein);
-
-	if(!KpmRunCommand(candidate_cmd, pipein))
-	{
-		KpmLogError("Failed to run deploy command.");
-		return;
-	}
+	return additional_files;
 }
 
-static void KpmPopulateManifestUserFile(const YAML::Node& config)
+static void KpmPopulateManifestUserFile(const std::vector<std::string>& files)
 {
-	const auto user_config = std::filesystem::path(KpmGetCachePath() + config["metadata"]["name"].as<std::string>() + ".user.json");
-	if(!std::filesystem::exists(user_config))
+	for(const auto& file : files)
 	{
-		// User didn't output anything
-		// Nothing to do
-		return;
-	}
-
-	std::ifstream f(user_config);
-	auto json = nlohmann::json::parse(f);
-
-	if(json.contains("additional_files") && json["additional_files"].is_array())
-	{
-		for(const auto& file : json["additional_files"])
+		// Check if file is in fact there
+		const auto filepath = std::filesystem::path(file);
+		if(!std::filesystem::exists(filepath))
 		{
-			// Check if file is in fact there
-			const auto filepath = file.get<std::string>();
-			if(!std::filesystem::exists(filepath))
-			{
-				KpmLogWarning("Additional file <{}> not found. Ignoring...", filepath);
-				continue;
-			}
-
-			KpmInstallManifestAddPath(filepath);
+			KpmLogWarning("Additional file <{}> not found. Ignoring...", filepath.string());
+			continue;
 		}
+
+		KpmInstallManifestAddPath(filepath.string());
 	}
-	
-	// Now delete the manifest.user.config
-	std::filesystem::remove(user_config);
 }
 
 static void KpmRunUserPostInstallScript(const YAML::Node& config)
@@ -796,10 +782,10 @@ static void KpmRunUserPostInstallScript(const YAML::Node& config)
 	}
 
 	// All ok, load the script and run it
-	KpmLaunchScript(path, config);
+	auto additional_files = KpmLaunchScript(path, config);
 
 	// Check if there is a user file with info for us to write on the manifest file
-	KpmPopulateManifestUserFile(config);
+	KpmPopulateManifestUserFile(additional_files);
 }
 
 static bool KpmInstallFromMemory(const std::string& data) noexcept
