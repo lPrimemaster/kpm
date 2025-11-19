@@ -22,7 +22,6 @@ find_package(CURL REQUIRED)
 find_package(LibArchive REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(CLI11 CONFIG REQUIRED)
-find_package(Python3 REQUIRED COMPONENTS Development)
 
 if(MSVC)
 	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -40,5 +39,4 @@ target_link_libraries(kpm PRIVATE
 	yaml-cpp::yaml-cpp
 	LibArchive::LibArchive	
 	CLI11::CLI11
-	Python3::Python
 )

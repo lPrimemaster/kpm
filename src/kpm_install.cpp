@@ -8,10 +8,14 @@
 #include <fstream>
 #include <iterator>
 #include <optional>
+#include <queue>
 #include <regex>
 #include <cstdio>
 
 #include <curl/curl.h>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 #include <yaml-cpp/exceptions.h>
 #include <yaml-cpp/node/parse.h>
 #include <yaml-cpp/yaml.h>
@@ -19,9 +23,6 @@
 #include <archive_entry.h>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
-
-#define PY_SSIZE_T_CLEAN
-#include <Python.h>
 
 #ifndef _WIN32
 #include <sys/utsname.h>
@@ -32,6 +33,9 @@
 #ifndef S_ISDIR
 #define S_ISDIR(m)  (((m) & _S_IFMT) == _S_IFDIR)
 #endif
+
+#define popen _popen
+#define pclose _pclose
 #endif
 
 KPM_SET_LOG_PREFIX(KpmInstall);
@@ -692,112 +696,6 @@ static std::optional<std::string> KpmGithubFetchEndpoint(const std::string& repo
 	return endpoint.substr(0, endpoint.rfind('/'));
 }
 
-static std::vector<std::string> KpmLaunchScript(const std::filesystem::path& path, const YAML::Node& config)
-{
-	// Init python
-	// NOTE: (César) Prevent bytecode generation
-	
-	PyConfig pyconfig;
-
-	PyConfig_InitPythonConfig(&pyconfig);
-	pyconfig.write_bytecode = 0;
-
-	PyStatus pystatus = Py_InitializeFromConfig(&pyconfig);
-
-	if(PyStatus_Exception(pystatus))
-	{
-		PyConfig_Clear(&pyconfig);
-		Py_ExitStatusException(pystatus);
-	}
-
-	PyConfig_Clear(&pyconfig);
-
-	auto abs_path = std::filesystem::absolute(path);
-
-	auto* sys_path = PySys_GetObject("path");
-	PyList_Append(sys_path, PyUnicode_FromString(abs_path.parent_path().string().c_str()));
-
-	KpmLogTrace("Running: {}", path.filename().string());
-	
-	auto* script_name = PyUnicode_FromString(path.filename().replace_extension("").string().c_str());
-	auto* module = PyImport_Import(script_name);
-	Py_DECREF(script_name);
-
-	if(!module)
-	{
-		PyErr_Print();
-		KpmLogError("User must define a 'post_install' function.");
-		KpmLogError("Failed to launch python user script.");
-		Py_Finalize();
-		return {};
-	}
-
-	auto* post_install_func = PyObject_GetAttrString(module, "post_install");
-	if(!post_install_func || !PyCallable_Check(post_install_func))
-	{
-		PyErr_Print();
-		Py_XDECREF(post_install_func);
-		Py_DECREF(module);
-		Py_Finalize();
-		return {};
-	}
-
-	auto* args = PyTuple_Pack(
-		3,
-		PyUnicode_FromString(config["metadata"]["name"].as<std::string>().c_str()),
-		PyUnicode_FromString(KpmGetCachePath().c_str()),
-		PyUnicode_FromString(KpmGetInstallPath(config).c_str())
-	);
-
-	auto* result = PyObject_CallObject(post_install_func, args);
-	Py_DECREF(args);
-
-	if(!result || !PyDict_Check(result))
-	{
-		PyErr_Print();
-		KpmLogError("Function 'post_install' must return a dictionary.");
-		Py_XDECREF(result);
-		Py_DECREF(post_install_func);
-		Py_DECREF(module);
-		Py_Finalize();
-		return {};
-	}
-
-	auto* items = PyDict_GetItemString(result, "additional_files");
-	std::vector<std::string> additional_files;
-
-	if(!items || !PyList_Check(items))
-	{
-		PyErr_Print();
-		KpmLogError("'additional_files' must return be a list.");
-		Py_XDECREF(result);
-		Py_DECREF(post_install_func);
-		Py_DECREF(module);
-		Py_Finalize();
-		return {};
-	}
-
-	auto size = PyList_Size(items);
-	for(Py_ssize_t i = 0; i < size; i++)
-	{
-		auto* item = PyList_GetItem(items, i);
-		if(!PyUnicode_Check(item))
-		{
-			KpmLogError("additional_files[{}] is not a string.", i);
-			continue;
-		}
-
-		additional_files.emplace_back(PyUnicode_AsUTF8(item));
-	}
-
-	Py_DECREF(result);
-	Py_DECREF(post_install_func);
-	Py_DECREF(module);
-	Py_Finalize();
-
-	return additional_files;
-}
-
 static void KpmPopulateManifestUserFile(const std::vector<std::string>& files)
 {
 	for(const auto& file : files)
@@ -814,27 +712,355 @@ static void KpmPopulateManifestUserFile(const std::vector<std::string>& files)
 	}
 }
 
-static void KpmRunUserPostInstallScript(const YAML::Node& config)
+static std::string KpmRunCommand(const std::string& type, const std::vector<std::string>& commands, const YAML::Node& config)
 {
-	if(!config["dist"]["deploy"])
+	auto fetch_and_copy_files_recursive = [&config](const std::string& dir, const std::string& other, bool delete_original = false) -> std::vector<std::string> {
+		std::vector<std::string> output;
+
+		std::string it_dir = dir;
+		if(std::filesystem::path(dir).is_relative())
+		{
+			it_dir = KpmGetInstallPath(config) + dir;
+		}
+		else
+		{
+			KpmLogError("copy or move operations can only have install relative source files.");
+			return {};
+		}
+
+		std::string it_other = other;
+		if(std::filesystem::path(other).is_relative())
+		{
+			it_other = KpmGetInstallPath(config) + other;
+		}
+
+		if(std::filesystem::is_regular_file(std::filesystem::absolute(it_dir)))
+		{
+			if(std::filesystem::is_regular_file(it_other))
+			{
+				std::filesystem::copy_file(std::filesystem::absolute(it_dir), std::filesystem::absolute(it_other), std::filesystem::copy_options::overwrite_existing);
+			}
+			else
+			{
+				std::filesystem::copy_file(std::filesystem::absolute(it_dir), std::filesystem::absolute(it_other) / std::filesystem::path(it_dir).filename(), std::filesystem::copy_options::overwrite_existing);
+			}
+
+			if(delete_original)
+			{
+				std::filesystem::remove(std::filesystem::absolute(it_dir));
+			}
+		}
+
+		std::filesystem::copy(it_dir, it_other, std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing);
+
+		for(const auto& file : std::filesystem::recursive_directory_iterator(std::filesystem::absolute(it_dir)))
+		{
+			output.push_back((std::filesystem::absolute(it_other) / std::filesystem::path(file).filename()).string());
+		}
+
+		if(delete_original)
+		{
+			std::filesystem::remove_all(it_dir);
+		}
+
+		output.push_back(std::filesystem::absolute(it_other));
+
+		return output;
+	};
+
+	if(type == "copy")
 	{
-		// There is no user deploy script
+		if(commands.size() < 2) return "";
+
+		auto files = fetch_and_copy_files_recursive(commands[0], commands[1], false);
+		KpmPopulateManifestUserFile(files);
+	}
+	else if(type == "mkdir")
+	{
+		if(commands.size() < 1) return "";
+
+		auto path = std::filesystem::path(commands[0]);
+		if(path.is_relative())
+		{
+			path = std::filesystem::absolute(std::filesystem::path(KpmGetInstallPath(config)) / path);
+		}
+
+		std::filesystem::create_directories(path);
+		KpmPopulateManifestUserFile({ path.string() });
+	}
+	else if(type == "rmdir")
+	{
+		if(commands.size() < 1) return "";
+
+		auto path = std::filesystem::path(commands[0]);
+		if(path.is_relative())
+		{
+			path = std::filesystem::absolute(std::filesystem::path(KpmGetInstallPath(config)) / path);
+			if(std::filesystem::is_directory(path))
+			{
+				std::filesystem::remove_all(path);
+			}
+			else
+			{
+				KpmLogError("rmdir can only remove directories.");
+			}
+		}
+		else
+		{
+			KpmLogError("rmdir can only remove installation relative directories.");
+		}
+	}
+	else if(type == "rmfile")
+	{
+		if(commands.size() < 1) return "";
+
+		auto path = std::filesystem::path(commands[0]);
+		if(path.is_relative())
+		{
+			path = std::filesystem::absolute(std::filesystem::path(KpmGetInstallPath(config)) / path);
+			if(std::filesystem::is_regular_file(path))
+			{
+				std::filesystem::remove(path);
+			}
+			else
+			{
+				KpmLogError("rmfile can only remove files.");
+			}
+		}
+		else
+		{
+			KpmLogError("rmfile can only remove installation relative files.");
+		}
+	}
+	else if(type == "move")
+	{
+		if(commands.size() < 2) return "";
+
+		auto files = fetch_and_copy_files_recursive(commands[0], commands[1], true);
+		KpmPopulateManifestUserFile(files);
+	}
+	else if(type == "exec")
+	{
+#ifdef __linux__
+		std::string command_full = "bash -c '";
+#else
+		std::string command_full = "cmd.exe /C ";
+#endif
+
+		for(const auto& cmd : commands)
+		{
+			command_full += (" " + cmd);
+		}
+
+#ifdef __linux__
+		command_full += "'";
+#endif
+
+		std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(command_full.c_str(), "r"), pclose);
+
+		if(!pipe)
+		{
+			KpmLogError("Failed to create pipe for command: {}", command_full);
+			return {};
+		}
+
+		std::string output;
+		char buffer[1024];
+		while(fgets(buffer, 128, pipe.get()))
+		{
+			output += buffer;
+		}
+		output.pop_back(); // Remove trailing '\n'
+
+		return output;
+	}
+
+	return {};
+}
+
+class KpmPICommand
+{
+public:
+	KpmPICommand(const std::string& type, const std::vector<std::string>& commands, const std::string& output)
+		: _type(type), _commands(commands), _output_var(output)
+	{
+	}
+
+	inline bool run(std::unordered_map<std::string, std::string>& variables, const YAML::Node& config)
+	{
+		bool error = false;
+		std::for_each(_commands.begin(), _commands.end(), [&variables, this, &error](std::string& cmd){
+			std::for_each(variables.cbegin(), variables.cend(), [&cmd, &variables, this, &error](const auto& var) { 
+				size_t pos = cmd.find(var.first);
+				if(pos != std::string::npos && pos != 0 && cmd[pos - 1] == '!')
+				{
+					auto vname = var.first;
+					auto end_pos = cmd.find(" ");
+					auto var = variables.find(vname);
+					if(var == variables.end())
+					{
+						KpmLogError("Command {}:", _type);
+						KpmLogError("Variable '{}' not found.", vname);
+						error = true;
+					}
+					else
+					{
+						if(var->second.empty())
+						{
+							KpmLogWarning("Command {}:", _type);
+							KpmLogWarning("Variable '{}' found but is empty.", vname);
+						}
+
+						KpmLogTrace("Var   : {}.", vname);
+						KpmLogTrace("Value : {}.", var->second);
+
+						std::string cmd_pre = cmd;
+						cmd.erase(pos - 1, vname.size() + 1);
+						cmd.insert(pos - 1, var->second);
+						KpmLogTrace("CMD Trace:\ncmd:\n\t\"{}\"\ncmd replaced:\n\t\"{}\"", cmd_pre, cmd);
+					}
+				}
+			});
+		});
+
+		if(error)
+		{
+			return false;
+		}
+
+		std::string output = KpmRunCommand(_type, _commands, config);
+		if(!_output_var.empty())
+		{
+			if(_output_var.rfind(":APPEND") != std::string::npos)
+			{
+				variables[_output_var.substr(0, _output_var.rfind(":"))] += output;
+			}
+			else
+			{
+				variables[_output_var] = output;
+			}
+		}
+
+		return true;
+	}
+
+private:
+	std::string _type;
+	std::string _output_var;
+	std::vector<std::string> _commands;
+};
+
+static std::vector<std::string> KpmSplitStringIgnoreQuote(const std::string& value, char sep = ' ')
+{
+	std::vector<std::string> args;
+	std::string cvalue;
+
+	bool inside_quotes = false;
+
+	for(size_t i = 0; i < value.size(); i++)
+	{
+		char c = value[i];
+
+		if(c == '"')
+		{
+			inside_quotes = !inside_quotes;
+			cvalue.push_back(c);
+		}
+		else if(c == sep && !inside_quotes)
+		{
+			args.push_back(cvalue);
+			cvalue.clear();
+		}
+		else
+	 	{
+			cvalue.push_back(c);
+		}
+	}
+
+	if(!cvalue.empty())
+	{
+		args.push_back(cvalue);
+	}
+
+	return args;
+}
+
+static auto KpmParseUserPostInstallSteps(const YAML::Node& config)
+{
+	std::unordered_map<std::string, std::string> variables;
+	std::queue<KpmPICommand> command_queue;
+
+	for(const auto& cmd : config)
+	{
+		auto item = cmd.begin();
+		const auto key = item->first.as<std::string>();
+		auto vitem = item->second;
+		std::string output_var;
+
+		if(key == "exec")
+		{
+			std::string tag = vitem.Tag();
+			if(!tag.empty())
+			{
+				if(tag != "!win32" && tag != "!linux")
+				{
+					KpmLogWarning("Unknow tag <{}>. Skipping command...", tag.substr(1));
+					continue;
+				}
+#ifdef __linux__
+				if(tag == "!win32")
+				{
+					KpmLogTrace("Skipping exec tagged <win32> only.");
+					continue;
+				}
+#else
+				if(tag == "!linux")
+				{
+					KpmLogTrace("Skipping exec tagged <linux> only.");
+					continue;
+				}
+#endif
+			}
+
+			if(vitem["output"])
+			{
+				output_var = vitem["output"].as<std::string>();
+				variables.emplace(output_var.substr(0, output_var.rfind(":")), std::string{});
+			}
+			if(vitem["cmd"])
+			{
+				vitem = item->second["cmd"];
+			}
+		}
+
+		const auto value = vitem.as<std::string>();
+		const auto args = KpmSplitStringIgnoreQuote(value);
+		command_queue.push({ key, args, output_var });
+	}
+
+	return std::make_tuple(variables, command_queue);
+}
+
+static void KpmRunUserPostInstallSteps(const YAML::Node& config)
+{
+	if(!config["dist"]["post_install"])
+	{
+		// There is no user post_install commands
 		// Silently ignore
 		return;
 	}
 
-	const auto path = std::filesystem::path(KpmGetInstallPath(config) + config["dist"]["deploy"].as<std::string>());
-	if(!std::filesystem::exists(path))
+	auto [variables, steps] = KpmParseUserPostInstallSteps(config["dist"]["post_install"]);
+
+	while(!steps.empty())
 	{
-		KpmLogError("Deploy script referenced, but file <{}> does not exist.", path.filename().string());
-		return;
+		steps.front().run(variables, config);
+		steps.pop();
 	}
 
-	// All ok, load the script and run it
-	auto additional_files = KpmLaunchScript(path, config);
-
-	if(!additional_files.empty())
+	if(variables.contains("KPM_USER_MANIFEST_FILES"))
 	{
+		auto additional_files = KpmSplitStringIgnoreQuote(variables["KPM_USER_MANIFEST_FILES"], '\n');
 		KpmPopulateManifestUserFile(additional_files);
 	}
 }
@@ -918,7 +1144,7 @@ static bool KpmInstallFromMemory(const std::string& data) noexcept
 	// TODO: (César) If prebuild or source fails during copying files
 	// 				 check if there are some dangling files that we need to remove
 	
-	KpmRunUserPostInstallScript(config);
+	KpmRunUserPostInstallSteps(config);
 
 	return KpmWriteManifest(config);
 }

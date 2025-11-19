@@ -52,6 +52,22 @@ static std::tuple<std::vector<std::string>, std::vector<std::string>> KpmOrderFi
 	return { ofiles, odirs };
 }
 
+static bool KpmRemoveDirIsEmptyRecursive(const std::filesystem::path& path)
+{
+	for(const auto& entry : std::filesystem::directory_iterator(path))
+	{
+		if(std::filesystem::is_directory(entry))
+		{
+			if(!KpmRemoveDirIsEmptyRecursive(entry)) return false;
+		}
+		else
+		{
+			return false;
+		}
+	}
+	return true;
+};
+
 static bool KpmRemoveFiles(const std::vector<std::string>& files)
 {
 	auto [ofiles, odirs] = KpmOrderFiles(files);
@@ -77,14 +93,10 @@ static bool KpmRemoveFiles(const std::vector<std::string>& files)
 	{
 		if(std::filesystem::exists(dir))
 		{
-			if(std::filesystem::is_empty(dir))
+			if(KpmRemoveDirIsEmptyRecursive(dir))
 			{
 				KpmLogTrace("Removing empty dir: {}", dir);
-				if(!std::filesystem::remove_all(dir))
-				{
-					KpmLogError("Failed to remove dir {}.", dir);
-					ok = false;
-				}
+				std::filesystem::remove_all(dir);
 			}
 		}
 		else
