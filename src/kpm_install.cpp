@@ -763,7 +763,7 @@ static std::string KpmRunCommand(const std::string& type, const std::vector<std:
 			std::filesystem::remove_all(it_dir);
 		}
 
-		output.push_back(std::filesystem::absolute(it_other));
+		output.push_back(std::filesystem::absolute(it_other).string());
 
 		return output;
 	};
