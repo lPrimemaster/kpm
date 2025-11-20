@@ -77,8 +77,10 @@ dist:
 Other available commands (self-explanatory): `copy`, `rmdir` and `rmfile`.
 
 All the files created:
+
 1. after install (from the tar.gz packages)
 2. with the post install commands: `copy`, `move` and `mkdir`
+
 will be deleted upon `kpm remove <package>`
 
 One can annotate post install commands with os specific tags.
