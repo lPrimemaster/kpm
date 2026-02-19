@@ -63,7 +63,7 @@ void KpmList()
 	}
 
 	std::cout << "Package";
-	for(std::uint32_t i = 0; i < padding; i++) std::cout << " ";
+	for(std::uint32_t i = 0; i < padding - 7; i++) std::cout << " ";
 	std::cout << "\tInstalled files\n";
 
 	for(std::uint32_t i = 0; i < padding; i++) std::cout << "-";
