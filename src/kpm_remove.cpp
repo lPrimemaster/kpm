@@ -9,15 +9,17 @@
 
 static std::optional<std::vector<std::string>> KpmReadManifest(const std::string& package)
 {
+	auto status = KpmSetupTuiScopeMessage("KpmReadManifest", "Reading manifest file...");
 	std::string package_manifest_file = KpmGetCachePath() + package + ".manifest";
 	std::ifstream file(package_manifest_file);
 
-	KpmLogTrace("Reading manifest file: {}", package_manifest_file);
+	// KpmLogTrace("Reading manifest file: {}", package_manifest_file);
 
 	if(!file.is_open())
 	{
-		KpmLogError("Failed to read manifest file.");
-		KpmLogWarning("Package {} may not be installed.", package);
+		// KpmLogError("Failed to read manifest file.");
+		// KpmLogWarning("Package {} may not be installed.", package);
+		status.error("Failed to read manifest. Package might not be installed.");
 		return std::nullopt;
 	}
 
@@ -70,23 +72,26 @@ static bool KpmRemoveDirIsEmptyRecursive(const std::filesystem::path& path)
 
 static bool KpmRemoveFiles(const std::vector<std::string>& files)
 {
+	auto status = KpmSetupTuiScopeMessage("KpmRemoveFiles", "Removing files...");
 	auto [ofiles, odirs] = KpmOrderFiles(files);
 	bool ok = true;
 	for(const auto& file : ofiles)
 	{
 		if(std::filesystem::exists(file))
 		{
-			KpmLogTrace("Removing file: {}", file);
+			// KpmLogTrace("Removing file: {}", file);
+			status.message("Removing file [" + file + "]...");
 			if(!std::filesystem::remove(file))
 			{
-				KpmLogError("Failed to remove file {}.", file);
+				// KpmLogError("Failed to remove file {}.", file);
+				status.error("Failed to remove file [" + file + "].");
 				ok = false;
 			}
 		}
-		else
-		{
-			KpmLogError("Failed to remove file {}. Does not exist.", file);
-		}
+		// else
+		// {
+		// 	KpmLogError("Failed to remove file {}. Does not exist.", file);
+		// }
 	}
 
 	for(const auto& dir : odirs)
@@ -95,14 +100,15 @@ static bool KpmRemoveFiles(const std::vector<std::string>& files)
 		{
 			if(KpmRemoveDirIsEmptyRecursive(dir))
 			{
-				KpmLogTrace("Removing empty dir: {}", dir);
+				status.message("Removing empty directory [" + dir + "]...");
+				// KpmLogTrace("Removing empty dir: {}", dir);
 				std::filesystem::remove_all(dir);
 			}
 		}
-		else
-		{
-			KpmLogError("Failed to remove dir {}. Does not exist.", dir);
-		}
+		// else
+		// {
+		// 	KpmLogError("Failed to remove dir {}. Does not exist.", dir);
+		// }
 	}
 
 	return ok;
@@ -110,39 +116,50 @@ static bool KpmRemoveFiles(const std::vector<std::string>& files)
 
 static bool KpmRemoveManifest(const std::string& package)
 {
+	auto status = KpmSetupTuiScopeMessage("KpmRemoveManifest", "Removing manifest...");
 	std::string package_manifest_file = KpmGetCachePath() + package + ".manifest";
 	if(std::filesystem::exists(package_manifest_file))
 	{
 		if(!std::filesystem::remove(package_manifest_file))
 		{
-			KpmLogError("Failed to remove manifest file {}.", package_manifest_file);
+			status.error("Failed to remove manifest file [" + package_manifest_file + "].");
+			// KpmLogError("Failed to remove manifest file {}.", package_manifest_file);
 			return false;
 		}
 	}
 	else
 	{
-		KpmLogError("Failed to remove manifest file {}. Does not exist.", package_manifest_file);
+		// KpmLogError("Failed to remove manifest file {}. Does not exist.", package_manifest_file);
+		status.error("Failed to remove manifest file [" + package_manifest_file + "]. File does not exist.");
 		return false;
 	}
 
-	KpmLogInfo("Successfully removed package {}.", package);
+	// KpmLogInfo("Successfully removed package {}.", package);
 	return true;
 }
 
 bool KpmRemove(const std::string &package)
 {
+	auto status = KpmSetupTuiScopeMessage("KpmRemove", "Removing package [" + package + "]...");
 	auto files = KpmReadManifest(package);
 
 	if(!files.has_value())
 	{
-		KpmLogError("Failed to remove package {}.", package);
+		// KpmLogError("Failed to remove package {}.", package);
+		status.error("Failed to remove package [" + package + "].");
 		return false;
 	}
 
 	if(KpmRemoveFiles(files.value()))
 	{
-		return KpmRemoveManifest(package);
+		if(!KpmRemoveManifest(package))
+		{
+			status.error("Failed to remove manifest file.");
+			return false;
+		}
+		return true;
 	}
 
+	status.error("Failed to remove files.");
 	return false;
 }

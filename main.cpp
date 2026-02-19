@@ -7,7 +7,7 @@ int main(int argc, char* argv[])
 	CLI::App app {"KISS package manager.\nJust keep it simple.", "kpm"};
 
 	CLI::App* install = app.add_subcommand("install", "Install a package.");
-	CLI::App* pack    = app.add_subcommand("pack", "Create a package.");
+	CLI::App* list = app.add_subcommand("list", "List installed packages.");
 	CLI::App* remove  = app.add_subcommand("remove", "Remove a package.");
 
 	std::string package_name;
@@ -54,7 +54,7 @@ int main(int argc, char* argv[])
 	{
 		KpmRemove(package_name);
 	}
-	else if(pack->parsed())
+	else if(list->parsed())
 	{
 	}
 	else

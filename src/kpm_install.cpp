@@ -2,6 +2,7 @@
 #include "logger.inl"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -13,6 +14,7 @@
 #include <cstdio>
 
 #include <curl/curl.h>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -206,9 +208,11 @@ static std::optional<std::string> KpmLoadYamlLocal(const std::string& file)
 
 static std::optional<std::string> KpmLoadYamlRemote(const std::string& url)
 {
+	auto status = KpmSetupTuiScopeMessage("KpmLoadYamlRemote", "Downloading metadata...");
 	auto data = KpmDownloadUrlFile(url);
 	if(!data.has_value())
 	{
+		status.error("Failed to download yaml metadata file.");
 		return std::nullopt;
 	}
 
@@ -601,16 +605,19 @@ static bool KpmExtractPackageData(const std::vector<std::uint8_t>& payload, cons
 
 static bool KpmDeployPrebuild(const std::string& package, const YAML::Node& config)
 {
+	auto status = KpmSetupTuiScopeMessage("KpmDeployPrebuild", "Downloading binaries...");
 	auto payload = KpmDownloadUrlFile(package);
 
 	if(!payload.has_value() || payload.value().empty())
 	{
+		status.error("Failed to download payload.");
 		return false;
 	}
 
 	if(!KpmExtractPackageData(payload.value(), config))
 	{
-		KpmLogError("Failed to extract payload data.");
+		// KpmLogError("Failed to extract payload data.");
+		status.error("Failed to extract payload.");
 		return false;
 	}
 
@@ -619,6 +626,7 @@ static bool KpmDeployPrebuild(const std::string& package, const YAML::Node& conf
 
 static bool KpmWriteManifest(const YAML::Node& config)
 {
+	auto status = KpmSetupTuiScopeMessage("KpmWriteManifest", "Writing manifest file...");
 	std::string package_manifest_file = KpmGetCachePath() + config["metadata"]["name"].as<std::string>() + ".manifest";
 	std::ofstream file(package_manifest_file);
 
@@ -626,7 +634,8 @@ static bool KpmWriteManifest(const YAML::Node& config)
 
 	if(!file.is_open())
 	{
-		KpmLogError("Failed to write manifest file.");
+		// KpmLogError("Failed to write manifest file.");
+		status.error("Failed to write manifest file.");
 		return false;
 	}
 
@@ -1067,6 +1076,7 @@ static void KpmRunUserPostInstallSteps(const YAML::Node& config)
 
 static bool KpmInstallFromMemory(const std::string& data) noexcept
 {
+	auto status = KpmSetupTuiScopeMessage("KpmInstallFromMemory", "Getting platform...");
 	std::optional<std::string> plat_tag = KpmGetPackagePlatformTag();
 	if(!plat_tag.has_value())
 	{
@@ -1074,11 +1084,14 @@ static bool KpmInstallFromMemory(const std::string& data) noexcept
 		return false;
 	}
 
+	status.message("Reading config file...");
 	YAML::Node config = KpmReadConfigFile(data).value_or(YAML::Node{});
 
+	status.message("Validating config file...");
 	if(!KpmValidateConfig(config))
 	{
-		KpmLogError("Invalid package config.");
+		// KpmLogError("Invalid package config.");
+		status.error("Invalid package config.");
 		return false;
 	}
 
@@ -1091,7 +1104,8 @@ static bool KpmInstallFromMemory(const std::string& data) noexcept
 		auto candidate = KpmGithubFetchEndpoint(endpoint, config);
 		if(!candidate.has_value())
 		{
-			KpmLogError("Invalid github repository or config.");
+			// KpmLogError("Invalid github repository or config.");
+			status.error("Invalid github repository or config.");
 			return false;
 		}
 
@@ -1120,23 +1134,28 @@ static bool KpmInstallFromMemory(const std::string& data) noexcept
 		{
 			// We found no binary for our platform
 			// And the package author did not provide a source dist
-			KpmLogError("Binary distribution for platform <{}> not found and source distribution not available.", plat_tag.value());
+			// KpmLogError("Binary distribution for platform <{}> not found and source distribution not available.", plat_tag.value());
+			status.error("Binary distribution for platform <" + plat_tag.value() + "> not found and source distribution not available.");
 			return false;
 		}
 
-		KpmLogInfo("Binary distribution for platform <{}> not found. Falling back to source distribution.", plat_tag.value());
+		// KpmLogInfo("Binary distribution for platform <{}> not found. Falling back to source distribution.", plat_tag.value());
+		status.message("Binary distribution for platform <" + plat_tag.value() + "> not found. Falling back to source distribution.");
 		if(!KpmDeploySource(src_package->second, config))
 		{
-			KpmLogError("Failed to deploy source distribution.");
+			// KpmLogError("Failed to deploy source distribution.");
+			status.error("Failed to deploy source distribution.");
 			return false;
 		}
 	}
 	else
 	{
-		KpmLogInfo("Found binary distribution for platform <{}>.", plat_tag.value());
+		// KpmLogInfo("Found binary distribution for platform <{}>.", plat_tag.value());
+		status.message("Installing binary distribution...");
 		if(!KpmDeployPrebuild(package->second, config))
 		{
-			KpmLogError("Failed to deploy pre-built files.");
+			// KpmLogError("Failed to deploy pre-built files.");
+			status.error("Failed to deploy pre-built files.");
 			return false;
 		}
 	}
@@ -1144,8 +1163,10 @@ static bool KpmInstallFromMemory(const std::string& data) noexcept
 	// TODO: (César) If prebuild or source fails during copying files
 	// 				 check if there are some dangling files that we need to remove
 	
+	status.message("Running post install steps...");
 	KpmRunUserPostInstallSteps(config);
 
+	status.message("Writing manifest...");
 	return KpmWriteManifest(config);
 }
 
@@ -1210,6 +1231,7 @@ static void KpmInstallSetPath(const std::string& path)
 
 bool KpmInstall(const std::string& package, const std::string& path)
 {
+	auto status = KpmSetupTuiScopeMessage("KpmInstall", "Installing package [" + package + "]...");
 	if(!path.empty())
 	{
 		KpmInstallSetPath(path);
