@@ -13,7 +13,7 @@ static std::vector<std::string> KpmGetInstalledPackagesManifestFiles(const std::
 	{
 		if(file.is_regular_file() && file.path().extension().string() == ".manifest")
 		{
-			files.push_back(file.path().filename());
+			files.push_back(file.path().filename().string());
 		}
 	}
 	return files;
