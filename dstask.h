@@ -12,6 +12,10 @@
 #include <vector>
 #include <shared_mutex>
 
+#ifdef _WIN32
+  #include <windows.h>
+#endif
+
 // Declaration
 namespace
 {
@@ -128,6 +132,9 @@ namespace dst
 {
 	Context::Context()
 	{
+#ifdef _WIN32
+		SetConsoleOutputCP(CP_UTF8);
+#endif
 		_renderer = std::make_unique<std::thread>([this](){
 			std::cout << CHIDE << CCLEAR;
 

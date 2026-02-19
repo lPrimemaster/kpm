@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <optional>
 #include "dstask.h"
 
 class KpmTuiMessageAutoComplete
@@ -18,6 +19,7 @@ class KpmTuiMessageAutoComplete
 
 bool KpmInstall(const std::string& package, const std::string& path);
 bool KpmRemove(const std::string& package);
+void KpmList();
 
 std::string KpmGetCachePath();
 

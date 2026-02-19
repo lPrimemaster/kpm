@@ -32,6 +32,7 @@ add_executable(kpm
 	main.cpp
 	src/kpm_install.cpp
 	src/kpm_remove.cpp
+	src/kpm_list.cpp
 	src/kpm_tui.cpp
 )
 

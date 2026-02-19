@@ -56,6 +56,7 @@ int main(int argc, char* argv[])
 	}
 	else if(list->parsed())
 	{
+		KpmList();
 	}
 	else
 	{
